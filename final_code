@@ -1,0 +1,103 @@
+import numpy as np
+import cv2
+import OpenEXR
+import Imath
+from ultralytics import YOLO
+
+# Function to read .exr depth file
+def read_exr_depth(file_path):
+    file = OpenEXR.InputFile(file_path)
+    dw = file.header()['dataWindow']
+    size = (dw.max.x - dw.min.x + 1, dw.max.y - dw.min.y + 1)
+    pt = Imath.PixelType(Imath.PixelType.FLOAT)
+    (R, G, B) = [np.frombuffer(file.channel(c, pt), dtype=np.float32) for c in "RGB"]
+    R.shape = size
+    return R
+
+# Function to get depth values within the bounding box
+def get_bbox_depth(R, bbox):
+    xmin, ymin, xmax, ymax = map(int, bbox)
+    return R[ymin:ymax, xmin:xmax]
+
+# Function to calculate the centroid of a bounding box
+def get_centroid(bbox):
+    x_center = (bbox[0] + bbox[2]) / 2
+    y_center = (bbox[1] + bbox[3]) / 2
+    return int(x_center), int(y_center)
+
+# Function to classify relative depth
+def classify_relative_depth(relative_depth):
+    if relative_depth < 0.02:
+        return "L1 = FAR AWAY"
+    elif 0.02 < relative_depth < 0.05:
+        return "L2 = CLOSE"
+    elif relative_depth < 0.07:
+        return "L3 = SAFE DISTANCE"
+    else:
+        return "L4 = VERY CLOSE"
+
+# Load the trained YOLOv8 model
+model = YOLO('runs/detect/train3/weights/best.pt')
+
+# Perform detection on the test image with a lower confidence threshold
+image_path = '/content/00033Left.png'
+depth_file_path = '/content/depth-image.exr'
+results = model(image_path, conf=0.03)  # Adjust the confidence threshold here
+
+# Read the corresponding .exr depth file
+R = read_exr_depth(depth_file_path)
+
+# Load the RGB image for annotation
+image = cv2.imread(image_path)
+height, width, _ = image.shape
+
+# Check if the image is loaded correctly
+if image is None:
+    raise ValueError("Error loading the image. Check the image path.")
+
+# Print out detection results to debug
+print("Detection Results:", results)
+
+# Assuming only one result
+result = results[0]
+if hasattr(result, 'boxes'):
+    for box in result.boxes.xyxy:
+        bbox = box[:4].tolist()  # [xmin, ymin, xmax, ymax]
+
+        # Ensure bounding box coordinates are within image bounds
+        bbox[0] = max(0, min(bbox[0], width))
+        bbox[1] = max(0, min(bbox[1], height))
+        bbox[2] = max(0, min(bbox[2], width))
+        bbox[3] = max(0, min(bbox[3], height))
+
+        print(f'Bounding Box: {bbox}')
+
+        bbox_depths = get_bbox_depth(R, bbox)
+        avg_depth = np.mean(bbox_depths)
+
+        print(f'Average Depth: {avg_depth}')
+
+        # Calculate relative depth
+        min_depth = np.min(R)
+        max_depth = np.max(R)
+        relative_depth = (avg_depth - min_depth) / (max_depth - min_depth)
+
+        # Classify relative depth
+        depth_level = classify_relative_depth(relative_depth)
+
+        # Calculate centroid
+        centroid = get_centroid(bbox)
+
+        # Annotate the image
+        cv2.rectangle(image, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (0, 255, 0), 2)
+        cv2.circle(image, centroid, 5, (0, 0, 255), -1)
+        cv2.putText(image, depth_level, (int(bbox[0]), int(bbox[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+# Display the annotated image using cv2.imshow (or cv2_imshow in Google Colab)
+try:
+    from google.colab.patches import cv2_imshow
+    cv2_imshow(image)
+except ImportError:
+    cv2.imshow("Annotated Image", image)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
